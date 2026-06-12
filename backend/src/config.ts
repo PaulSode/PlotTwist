@@ -21,7 +21,7 @@ export const config = {
     /** Fast structured extraction of entities from chapter text. */
     extraction: 'claude-sonnet-4-6',
     /** Nuanced reasoning: is this a real contradiction or character evolution? */
-    consistency: 'claude-opus-4-7',
+    consistency: 'claude-opus-4-8',
     /** Streaming assistant for the author (continuation suggestions, Q&A). */
     assistant: 'claude-sonnet-4-6',
     /** Cheap summarization tasks (chapter summary, character resync). */

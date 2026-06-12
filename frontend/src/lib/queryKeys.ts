@@ -7,6 +7,7 @@
  */
 
 export const qk = {
+  me: () => ['me'] as const,
   projects: () => ['projects'] as const,
   project: (id: string) => ['project', id] as const,
   chapters: (projectId: string) => ['chapters', projectId] as const,
@@ -23,4 +24,6 @@ export const qk = {
     ['inconsistencies', projectId, status ?? 'all'] as const,
   inconsistenciesForChapter: (chapterId: string) =>
     ['inconsistencies', 'chapter', chapterId] as const,
+  search: (projectId: string, query: string) =>
+    ['search', projectId, query] as const,
 };

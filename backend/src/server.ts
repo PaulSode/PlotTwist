@@ -12,6 +12,7 @@ import { bibleRoutes } from './routes/bible.js';
 import { inconsistencyRoutes } from './routes/inconsistencies.js';
 import { searchRoutes } from './routes/search.js';
 import { assistantRoutes } from './routes/assistant.js';
+import { meRoutes } from './routes/me.js';
 
 async function build() {
   const app = Fastify({
@@ -27,7 +28,7 @@ async function build() {
 
   await app.register(cors, {
     origin: config.env === 'production'
-      ? [/\.plotwise\.app$/]
+      ? [/\.plottwist\.app$/]
       : true,
     credentials: true,
   });
@@ -56,6 +57,7 @@ async function build() {
       await api.register(inconsistencyRoutes);
       await api.register(searchRoutes);
       await api.register(assistantRoutes);
+      await api.register(meRoutes);
     },
     { prefix: '/v1' },
   );

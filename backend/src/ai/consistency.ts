@@ -11,7 +11,7 @@
  * record to the author.
  */
 
-import { anthropic } from './client.js';
+import { anthropic, cachedSystem } from './client.js';
 import { config } from '../config.js';
 import { CONSISTENCY_SYSTEM, CONSISTENCY_TOOL } from './prompts.js';
 
@@ -51,7 +51,7 @@ Use the evaluate_contradiction tool.`;
   const response = await anthropic.messages.create({
     model: config.models.consistency,
     max_tokens: 1024,
-    system: CONSISTENCY_SYSTEM,
+    system: cachedSystem(CONSISTENCY_SYSTEM),
     tools: [CONSISTENCY_TOOL],
     tool_choice: { type: 'tool', name: 'evaluate_contradiction' },
     messages: [{ role: 'user', content: userMessage }],

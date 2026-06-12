@@ -1,8 +1,8 @@
-# Plotwise
+# PlotTwist
 
 > Le copilote d'écriture qui *comprend* l'histoire.
 
-Plotwise est une application web pour auteurs de romans, sagas et scénarios. Elle analyse le manuscrit en continu grâce à l'IA et construit automatiquement une **bible vivante** de l'univers narratif (personnages, lieux, événements, relations) sans aucune saisie manuelle. Elle détecte les incohérences en temps réel et répond aux questions de l'auteur en s'appuyant sur l'intégralité du texte.
+PlotTwist est une application web pour auteurs de romans, sagas et scénarios. Elle analyse le manuscrit en continu grâce à l'IA et construit automatiquement une **bible vivante** de l'univers narratif (personnages, lieux, événements, relations) sans aucune saisie manuelle. Elle détecte les incohérences en temps réel et répond aux questions de l'auteur en s'appuyant sur l'intégralité du texte.
 
 ---
 
@@ -11,7 +11,7 @@ Plotwise est une application web pour auteurs de romans, sagas et scénarios. El
 - **Éditeur trois panneaux** - zone d'écriture centrale, sidebar chapitres, panneau contextuel IA en direct
 - **Extraction automatique** - à chaque sauvegarde de chapitre, Claude identifie les personnages présents, les nouveaux attributs déclarés, les événements et les évolutions de relations
 - **Bible vivante** - fiches personnages, lieux et objets générées et maintenues par l'IA, consultables depuis les dashboards
-- **Détection d'incohérences** - si un fait contredit un fait antérieur (couleur des yeux, rang social, chronologie…), Plotwise le signale avec les deux passages en regard
+- **Détection d'incohérences** - si un fait contredit un fait antérieur (couleur des yeux, rang social, chronologie…), PlotTwist le signale avec les deux passages en regard
 - **Recherche sémantique** - retrouver n'importe quel passage du manuscrit par sens, pas par mot-clé exact
 - **Assistant conversationnel** - répondre à des questions sur l'histoire ("où est Liora au chapitre 12 ?", "quels personnages connaissent ce secret ?") en streaming, avec les extraits sources cités
 
@@ -19,10 +19,10 @@ Plotwise est une application web pour auteurs de romans, sagas et scénarios. El
 
 ## Architecture
 
-Plotwise est structuré en deux packages indépendants :
+PlotTwist est structuré en deux packages indépendants :
 
 ```
-plotwise/
+plottwist/
 ├── backend/   # API Fastify + pipeline IA
 └── frontend/  # Application React
 ```
@@ -48,18 +48,21 @@ plotwise/
 | Résumés de chapitres | `claude-haiku-4-5-20251001` | Économique pour un résultat simple |
 | Assistant conversationnel | `claude-sonnet-4-20250514` | Streaming SSE fluide |
 
-**Le pipeline d'analyse** - ce qui se passe à chaque sauvegarde de chapitre :
+**Le pipeline d'analyse** - déclenché **manuellement** par l'auteur (bouton « Analyser le chapitre »), pas à chaque frappe. La sauvegarde du texte reste gratuite ; l'analyse IA, coûteuse, ne tourne que sur demande :
 
 ```
-PUT /v1/chapters/:id/content
-  → debounce 4s
-  → analyzeChapter()
-      1. Compiler la bible en résumé compact (~2-3k tokens)
-      2. Extraire les entités (Sonnet + tool_use)
-      3. Détecter les contradictions (Opus)
-      4. Fusionner dans la bible
-      5. Re-chunker et re-indexer pour le RAG
+PUT /v1/chapters/:id/content      → sauvegarde le texte, incrémente analysisVersion (aucun appel IA)
+POST /v1/chapters/:id/analyze     → lance le pipeline et STREAME sa progression (SSE) :
+  → analyzeChapter()  ──emits──▶  event: step { step, index, total }
+      0. preparing    Compiler la bible en résumé compact (~2-3k tokens)
+      1. extracting   Extraire les entités (Sonnet + tool_use)
+      2. bible        Fusionner + détecter les contradictions (Opus)
+      3. indexing     Re-chunker et re-indexer pour le RAG
+      4. finalizing   Marquer le chapitre analysé
+  ◀──── event: done / event: error
 ```
+
+Le frontend consomme ce flux pour animer un **stepper** en direct dans l'éditeur. Chaque étape est isolée : l'échec d'une étape secondaire (embeddings, cohérence) n'empêche pas le chapitre d'être marqué analysé, donc l'interface ne reste jamais bloquée sur « analyse en cours ».
 
 **Structure du code :**
 
@@ -108,8 +111,13 @@ scripts/
 |---|---|
 | `/` | Liste des projets |
 | `/projects/:id/manuscript` | Éditeur trois panneaux (écriture + contexte IA) |
-| `/projects/:id/bible` | Bible - fiches personnages, lieux, objets |
+| `/projects/:id/characters` | Bible - fiches personnages (+ `/characters/:id`) |
+| `/projects/:id/locations` | Bible - lieux |
+| `/projects/:id/objects` | Bible - objets narratifs |
+| `/projects/:id/timeline` | Chronologie des événements |
+| `/projects/:id/relationships` | Graphe des relations |
 | `/projects/:id/inconsistencies` | Liste des incohérences détectées |
+| `/projects/:id/search` | Recherche sémantique dans le manuscrit |
 | `/projects/:id/assistant` | Chat avec l'IA sur l'histoire |
 
 ---
@@ -126,7 +134,7 @@ scripts/
 ### Backend
 
 ```bash
-cd plotwise-backend
+cd plottwist-backend
 cp .env.example .env
 # Remplir : MONGO_URI, ANTHROPIC_API_KEY, VOYAGE_API_KEY
 npm install
@@ -139,7 +147,7 @@ Vérification : `curl http://localhost:3001/healthz`
 ### Frontend
 
 ```bash
-cd plotwise-frontend
+cd plottwist-frontend
 cp .env.example .env
 # Remplir : VITE_DEV_USER_ID=<id_mongo_user>
 npm install
@@ -154,7 +162,7 @@ npm run dev       # http://localhost:5173
 
 | Variable | Description | Exemple |
 |---|---|---|
-| `MONGO_URI` | URI de connexion Atlas | `mongodb+srv://user:pass@cluster.mongodb.net/plotwise` |
+| `MONGO_URI` | URI de connexion Atlas | `mongodb+srv://user:pass@cluster.mongodb.net/plottwist` |
 | `ANTHROPIC_API_KEY` | Clé API Anthropic | `sk-ant-…` |
 | `VOYAGE_API_KEY` | Clé API Voyage AI | `pa-…` |
 | `PORT` | Port d'écoute | `3001` |
@@ -173,7 +181,7 @@ npm run dev       # http://localhost:5173
 ## Points de conception importants
 
 **Pourquoi trois couches de stockage ?**
-Un seul grand fichier est trop coûteux à envoyer à chaque requête IA. Des fichiers séparés par chapitre perdent la cohérence transverse. Plotwise sépare : (1) le texte brut par chapitre (source de vérité), (2) une bible structurée compacte alimentant les dashboards, (3) un index sémantique pour le RAG ciblé. Le coût et la latence restent constants quelle que soit la longueur du manuscrit.
+Un seul grand fichier est trop coûteux à envoyer à chaque requête IA. Des fichiers séparés par chapitre perdent la cohérence transverse. PlotTwist sépare : (1) le texte brut par chapitre (source de vérité), (2) une bible structurée compacte alimentant les dashboards, (3) un index sémantique pour le RAG ciblé. Le coût et la latence restent constants quelle que soit la longueur du manuscrit.
 
 **Pourquoi `tool_use` pour l'extraction ?**
 Forcer un schéma de sortie via `tool_use` est plus fiable que demander du JSON en texte libre. Claude retourne toujours la structure attendue, ce qui évite le parsing défensif et les hallucinations de format.
@@ -188,8 +196,14 @@ Forcer un schéma de sortie via `tool_use` est plus fiable que demander du JSON 
 - Authentification en mode dev uniquement (`Authorization: Dev <userId>`) // à remplacer par JWT / OAuth en production
 - File d'analyse en mémoire — pas de persistance entre redémarrages du serveur
 - Pas de quotas par utilisateur sur les appels Anthropic
-- Nettoyage des attributs orphelins après suppression d'un chapitre non implémenté
 - Export de la bible (PDF / Markdown) prévu mais absent
+
+### Optimisations de coûts en place
+
+- **Analyse à la demande** : le pipeline IA (extraction + cohérence + embeddings) ne tourne plus à chaque sauvegarde mais sur clic explicite (« Analyser le chapitre »). Écrire et sauvegarder reste gratuit ; l'auteur maîtrise quand dépenser des crédits.
+- **Prompt caching** (`cache_control: ephemeral`) sur le préfixe constant (system + schémas d'outils) des appels d'extraction, de cohérence et de l'assistant — le gros du contexte est réutilisé d'une analyse à l'autre.
+- **Extraction parcimonieuse** : le prompt plafonne le nombre d'attributs par entité et impose des clés `snake_case` stables, ce qui réduit la taille des sorties et améliore la détection de contradictions.
+- **Nettoyage en cascade** : la suppression d'un chapitre (ou d'un projet) purge les entités, événements, relations, incohérences et chunks orphelins — la bible et l'index RAG restent compacts.
 
 ---
 

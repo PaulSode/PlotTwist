@@ -3,7 +3,9 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { projectsApi } from '../lib/api';
 import { qk } from '../lib/queryKeys';
-import { IconBook, IconPlus, IconArrow } from '../components/icons';
+import { ConfirmDialog } from '../components/ConfirmDialog';
+import type { Project } from '../lib/types';
+import { IconBook, IconPlus, IconArrow, IconTrash } from '../components/icons';
 
 export function ProjectsListPage() {
   const navigate = useNavigate();
@@ -30,12 +32,23 @@ export function ProjectsListPage() {
     create.mutate({ title: title.trim() });
   };
 
+  // ─── Delete project ──────────────────────────────────────────────────────
+  const [toDelete, setToDelete] = useState<Project | null>(null);
+
+  const remove = useMutation({
+    mutationFn: (id: string) => projectsApi.remove(id),
+    onSuccess: () => {
+      setToDelete(null);
+      qc.invalidateQueries({ queryKey: qk.projects() });
+    },
+  });
+
   return (
     <div className="standalone">
       <div className="hero">
         <div className="brand-row">
           <span className="brand-mark" />
-          <span className="brand-text">Plotwise</span>
+          <span className="brand-text">PlotTwist</span>
         </div>
         <h1>Vos œuvres</h1>
         <p className="hero-sub">
@@ -56,7 +69,7 @@ export function ProjectsListPage() {
 
         <ul className="proj-list">
           {projectsQ.data?.projects.map((p) => (
-            <li key={p._id}>
+            <li key={p._id} className="proj-li">
               <Link to={`/projects/${p._id}/manuscript`} className="proj">
                 <span className="proj-ico">
                   <IconBook size={16} />
@@ -74,6 +87,18 @@ export function ProjectsListPage() {
                   <IconArrow size={14} />
                 </span>
               </Link>
+              <button
+                className="proj-del"
+                title="Supprimer cette œuvre"
+                aria-label={`Supprimer ${p.title}`}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setToDelete(p);
+                }}
+              >
+                <IconTrash size={13} />
+              </button>
             </li>
           ))}
         </ul>
@@ -124,6 +149,24 @@ export function ProjectsListPage() {
         )}
       </section>
 
+      <ConfirmDialog
+        open={!!toDelete}
+        title="Supprimer cette œuvre ?"
+        message={
+          <>
+            Vous êtes sur le point de supprimer <em>{toDelete?.title}</em>. Tous les
+            chapitres, la bible (personnages, lieux, événements, relations) et les
+            incohérences associées seront définitivement effacés. Cette action est
+            irréversible.
+          </>
+        }
+        confirmLabel="Supprimer l'œuvre"
+        destructive
+        busy={remove.isPending}
+        onConfirm={() => toDelete && remove.mutate(toDelete._id)}
+        onCancel={() => setToDelete(null)}
+      />
+
       <style>{`
         .standalone {
           height: 100vh; overflow-y: auto;
@@ -145,6 +188,7 @@ export function ProjectsListPage() {
 
         .projects { max-width: 580px; width: 100%; }
         .proj-list { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+        .proj-li { position: relative; }
         .proj {
           display: flex; align-items: center; gap: 14px;
           background: var(--bg-panel);
@@ -153,6 +197,19 @@ export function ProjectsListPage() {
           transition: border-color 100ms, background 100ms;
         }
         .proj:hover { border-color: var(--border-strong); background: var(--bg-hover); }
+        .proj-del {
+          position: absolute; top: 50%; right: 44px;
+          transform: translateY(-50%);
+          display: flex; align-items: center; justify-content: center;
+          width: 28px; height: 28px;
+          background: none; border: 1px solid transparent;
+          border-radius: 5px; color: var(--text-3);
+          cursor: pointer; opacity: 0;
+          transition: opacity 100ms, color 100ms, background 100ms, border-color 100ms;
+        }
+        .proj-li:hover .proj-del { opacity: 1; }
+        .proj-del:hover { color: var(--danger); background: var(--danger-bg); border-color: var(--danger-strong); }
+        .proj-del:focus-visible { opacity: 1; outline: none; color: var(--danger); border-color: var(--danger-strong); }
         .proj-ico {
           width: 30px; height: 30px; flex-shrink: 0;
           border-radius: 5px; background: var(--bg-elevated);

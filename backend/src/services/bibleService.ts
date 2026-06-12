@@ -1,5 +1,5 @@
 /**
- * Bible service — the orchestration heart of Plotwise.
+ * Bible service — the orchestration heart of PlotTwist.
  *
  * `analyzeChapter()` runs the full pipeline for a single chapter:
  *
@@ -34,12 +34,40 @@ import { analyzeConflict } from '../ai/consistency.js';
 import { chunkChapter, embedTexts } from '../ai/embeddings.js';
 import { buildBibleSummary } from '../ai/prompts.js';
 
+// ─── Progress reporting ──────────────────────────────────────────────────────
+/** Ordered phases the editor's stepper renders. */
+export type AnalysisStep = 'preparing' | 'extracting' | 'bible' | 'indexing' | 'finalizing';
+export const ANALYSIS_STEPS: AnalysisStep[] = [
+  'preparing',
+  'extracting',
+  'bible',
+  'indexing',
+  'finalizing',
+];
+
+export interface AnalysisProgress {
+  step: AnalysisStep;
+  index: number;
+  total: number;
+}
+
+export interface AnalyzeOptions {
+  /** Called at the start of each phase so the UI can drive a live stepper. */
+  onProgress?: (p: AnalysisProgress) => void;
+}
+
 // ─── Entry point ─────────────────────────────────────────────────────────────
-export async function analyzeChapter(chapterId: string): Promise<void> {
+export async function analyzeChapter(chapterId: string, opts: AnalyzeOptions = {}): Promise<void> {
+  const total = ANALYSIS_STEPS.length;
+  const emit = (step: AnalysisStep): void => {
+    opts.onProgress?.({ step, index: ANALYSIS_STEPS.indexOf(step), total });
+  };
+
   const chapter = await Chapter.findById(chapterId);
   if (!chapter) throw new Error(`Chapter ${chapterId} not found`);
   if (!chapter.content || chapter.content.trim().length < 50) {
     // Too short to analyze meaningfully. Mark as analyzed and bail.
+    emit('finalizing');
     chapter.lastAnalyzedVersion = chapter.analysisVersion;
     chapter.lastAnalyzedAt = new Date();
     await chapter.save();
@@ -50,10 +78,12 @@ export async function analyzeChapter(chapterId: string): Promise<void> {
   const startVersion = chapter.analysisVersion;
 
   // 1. Build bible summary
+  emit('preparing');
   const bibleSummary = await buildProjectBibleSummary(String(projectId));
+  const position = await formatChapterPosition(chapter);
 
   // 2. Extract
-  const position = await formatChapterPosition(chapter);
+  emit('extracting');
   const extraction = await extractChapter({
     chapterText: chapter.content,
     chapterTitle: chapter.title,
@@ -61,21 +91,137 @@ export async function analyzeChapter(chapterId: string): Promise<void> {
     bibleSummary,
   });
 
-  // 3. Merge entities
-  await mergeCharacters(String(projectId), String(chapterId), extraction.characters);
-  await mergeLocations(String(projectId), String(chapterId), extraction.locations);
-  await mergeObjects(String(projectId), String(chapterId), extraction.objects);
-  await persistEvents(String(projectId), String(chapterId), extraction.events);
-  await persistRelationships(String(projectId), String(chapterId), extraction.relationships);
+  // 3. Merge entities (incl. consistency checks).
+  // Each step is isolated: a failure in one (e.g. a consistency check timing out,
+  // or the embeddings provider erroring) must NOT prevent the chapter from being
+  // marked analyzed. Otherwise the UI would show "analyse en cours…" forever and
+  // never refresh the bible, even though most of the extraction succeeded.
+  emit('bible');
+  await runStep('mergeCharacters', () =>
+    mergeCharacters(String(projectId), String(chapterId), extraction.characters),
+  );
+  await runStep('mergeLocations', () =>
+    mergeLocations(String(projectId), String(chapterId), extraction.locations),
+  );
+  await runStep('mergeObjects', () =>
+    mergeObjects(String(projectId), String(chapterId), extraction.objects),
+  );
+  await runStep('persistEvents', () =>
+    persistEvents(String(projectId), String(chapterId), extraction.events),
+  );
+  await runStep('persistRelationships', () =>
+    persistRelationships(String(projectId), String(chapterId), extraction.relationships),
+  );
 
-  // 4. Re-chunk + re-embed
-  await reindexChunks(String(projectId), String(chapterId), chapter.content, startVersion);
+  // 4. Re-chunk + re-embed (RAG index). Most failure-prone step (external
+  // embeddings API + Atlas) and least critical for the dashboards → isolated.
+  emit('indexing');
+  await runStep('reindexChunks', () =>
+    reindexChunks(String(projectId), String(chapterId), chapter.content, startVersion),
+  );
 
-  // 5. Mark chapter as analyzed
+  // 5. Mark chapter as analyzed. Reached as long as extraction succeeded, so the
+  //    editor's "analyse en cours" indicator clears and the bible queries refresh.
+  emit('finalizing');
   chapter.aiSummary = extraction.chapterSummary;
   chapter.lastAnalyzedVersion = startVersion;
   chapter.lastAnalyzedAt = new Date();
   await chapter.save();
+}
+
+/** Run a pipeline step, logging (but swallowing) any error so the run continues. */
+async function runStep(name: string, fn: () => Promise<void>): Promise<void> {
+  try {
+    await fn();
+  } catch (err) {
+    console.error(`[analysis] step "${name}" failed (continuing):`, err);
+  }
+}
+
+// ─── Chapter deletion cleanup ────────────────────────────────────────────────
+/**
+ * Remove every trace a chapter left in the bible. Called when a chapter is
+ * deleted so we don't leave orphaned claims behind (which would pollute the
+ * bible summary, the RAG index, and the consistency checks — and cost tokens).
+ *
+ * For each entity we:
+ *   - drop attributes sourced from this chapter
+ *   - drop the appearance entry for this chapter
+ *   - delete the entity entirely if it now has no remaining appearances
+ *     (i.e. it only existed because of the deleted chapter)
+ */
+export async function cleanupChapterData(projectId: string, chapterId: string): Promise<void> {
+  const pid = new Types.ObjectId(projectId);
+  const cid = new Types.ObjectId(chapterId);
+
+  // Events, chunks and chapter-scoped inconsistencies are pure children → just delete.
+  await Promise.all([
+    Event.deleteMany({ projectId: pid, chapterId: cid }),
+    Chunk.deleteMany({ chapterId: cid }),
+    Inconsistency.deleteMany({
+      projectId: pid,
+      $or: [{ 'claimA.chapterId': cid }, { 'claimB.chapterId': cid }],
+    }),
+  ]);
+
+  // Entities (characters / locations / objects): strip this chapter's contributions.
+  // The three models share the same embedded shape; treat them through a loose
+  // common type so we can iterate over them uniformly.
+  type EntityModel = (typeof Character | typeof Location | typeof StoryObject);
+  const entityModels: EntityModel[] = [Character, Location, StoryObject];
+  for (const Model of entityModels) {
+    const entities = await (Model as typeof Character).find({
+      projectId: pid,
+      $or: [{ 'attributes.sourceChapterId': cid }, { 'appearances.chapterId': cid }],
+    });
+    for (const entity of entities) {
+      const e = entity as unknown as {
+        attributes: { sourceChapterId: unknown }[];
+        appearances: { chapterId: unknown }[];
+        deleteOne: () => Promise<unknown>;
+        save: () => Promise<unknown>;
+      };
+      e.attributes = e.attributes.filter((a) => String(a.sourceChapterId) !== chapterId);
+      e.appearances = (e.appearances ?? []).filter((ap) => String(ap.chapterId) !== chapterId);
+      // Entity no longer appears anywhere → it was born from this chapter alone.
+      if (e.appearances.length === 0 && e.attributes.length === 0) {
+        await e.deleteOne();
+      } else {
+        await e.save();
+      }
+    }
+  }
+
+  // Relationships: drop evolution entries from this chapter; delete if left empty.
+  const rels = await Relationship.find({ projectId: pid, 'evolution.chapterId': cid });
+  for (const rel of rels) {
+    rel.evolution = rel.evolution.filter(
+      (e) => String(e.chapterId) !== chapterId,
+    ) as typeof rel.evolution;
+    if (rel.evolution.length === 0) {
+      await rel.deleteOne();
+    } else {
+      await rel.save();
+    }
+  }
+}
+
+/**
+ * Delete every document belonging to a project. Called when a project is
+ * removed so we don't leak chapters, entities, chunks, etc. across the DB.
+ */
+export async function cleanupProjectData(projectId: string): Promise<void> {
+  const pid = new Types.ObjectId(projectId);
+  await Promise.all([
+    Chapter.deleteMany({ projectId: pid }),
+    Character.deleteMany({ projectId: pid }),
+    Location.deleteMany({ projectId: pid }),
+    StoryObject.deleteMany({ projectId: pid }),
+    Event.deleteMany({ projectId: pid }),
+    Relationship.deleteMany({ projectId: pid }),
+    Inconsistency.deleteMany({ projectId: pid }),
+    Chunk.deleteMany({ projectId: pid }),
+  ]);
 }
 
 // ─── Bible summary builder ───────────────────────────────────────────────────
@@ -186,9 +332,15 @@ async function mergeCharacters(
 
     await character.save();
 
-    // Process conflicts → run consistency analysis on each
+    // Process conflicts → run consistency analysis on each.
+    // Isolated per-conflict: a single flaky consistency call must not abort the
+    // whole merge (which would leave the chapter perpetually "in analysis").
     for (const conflict of conflicts) {
-      await processCharacterConflict(character, chapterId, conflict.attribute, conflict.existing);
+      try {
+        await processCharacterConflict(character, chapterId, conflict.attribute, conflict.existing);
+      } catch (err) {
+        console.error('[analysis] consistency check failed (continuing):', err);
+      }
     }
   }
 }

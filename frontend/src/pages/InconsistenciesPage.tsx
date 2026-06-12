@@ -88,9 +88,6 @@ export function InconsistenciesPage() {
                 inconsistency={ic}
                 entityName={charNameById.get(ic.entityId) ?? '?'}
                 projectId={projectId}
-                onChange={() =>
-                  qc(useQueryClient(), projectId)
-                }
               />
             ))}
           </ul>
@@ -108,7 +105,6 @@ interface RowProps {
   inconsistency: Inconsistency;
   entityName: string;
   projectId: string;
-  onChange: () => void;
 }
 
 function InconsistencyRow({ inconsistency: ic, entityName, projectId }: RowProps) {
@@ -117,6 +113,7 @@ function InconsistencyRow({ inconsistency: ic, entityName, projectId }: RowProps
     mutationFn: (status: 'resolved' | 'ignored' | 'open') =>
       inconsistenciesApi.update(ic._id, { status }),
     onSuccess: () => {
+      // Refresh every inconsistency view (list filters + sidebar badge + editor panel).
       qc.invalidateQueries({ queryKey: ['inconsistencies'] });
     },
   });
@@ -209,11 +206,6 @@ function InconsistencyRow({ inconsistency: ic, entityName, projectId }: RowProps
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function qc(client: ReturnType<typeof useQueryClient>, projectId: string) {
-  client.invalidateQueries({ queryKey: ['inconsistencies'] });
-  client.invalidateQueries({ queryKey: qk.inconsistencies(projectId, 'open') });
-}
 
 function labelFilter(s: Filter): string {
   return { open: 'Ouvertes', resolved: 'Résolues', ignored: 'Ignorées', all: 'Toutes' }[s];

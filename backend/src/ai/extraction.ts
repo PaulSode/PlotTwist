@@ -8,7 +8,7 @@
  * Cost: ~1 call per chapter save (debounced upstream by the analysis queue).
  */
 
-import { anthropic } from './client.js';
+import { anthropic, cachedSystem } from './client.js';
 import { config } from '../config.js';
 import { EXTRACTION_SYSTEM, EXTRACTION_TOOL } from './prompts.js';
 
@@ -95,7 +95,8 @@ Extract everything newly stated, revealed, or evolved in this chapter. Use the r
   const response = await anthropic.messages.create({
     model: config.models.extraction,
     max_tokens: 4096,
-    system: EXTRACTION_SYSTEM,
+    // Cache the constant tools + system prefix (reused on every chapter save).
+    system: cachedSystem(EXTRACTION_SYSTEM),
     tools: [EXTRACTION_TOOL],
     tool_choice: { type: 'tool', name: 'record_extraction' },
     messages: [{ role: 'user', content: userMessage }],

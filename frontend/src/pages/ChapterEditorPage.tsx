@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { chaptersApi, projectsApi } from '../lib/api';
+import { chaptersApi, projectsApi, streamAnalysis } from '../lib/api';
 import { qk } from '../lib/queryKeys';
 import { Sidebar } from '../components/Sidebar';
 import { EditorPanel } from '../components/EditorPanel';
 import { ConfirmDialog } from '../components/ConfirmDialog';
-import { IconPlus, IconTrash } from '../components/icons';
+import { IconPlus, IconTrash, IconSparkle } from '../components/icons';
 
 /**
  * The manuscript editor.
@@ -21,12 +21,20 @@ import { IconPlus, IconTrash } from '../components/icons';
  */
 
 const SAVE_DEBOUNCE_MS = 1500;
-const ANALYSIS_POLL_MS = 5000;
 
 export function ChapterEditorPage() {
   const { projectId = '', chapterId } = useParams();
   const navigate = useNavigate();
   const qc = useQueryClient();
+
+  // ─── Manual analysis state ─────────────────────────────────────────────
+  // Analysis is user-triggered (cost control). It streams live progress over
+  // SSE; `analysisStep` is the index of the phase currently running (-1 = none).
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analyzeError, setAnalyzeError] = useState<string | null>(null);
+  const [analysisStep, setAnalysisStep] = useState<number>(-1);
+  const analyzeAbort = useRef<AbortController | null>(null);
+  const analyzeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ─── Initial chapter selection ─────────────────────────────────────────
   // If no chapterId in URL and the project has chapters, jump to the first one.
@@ -84,8 +92,8 @@ export function ChapterEditorPage() {
     queryKey: qk.chapter(chapterId ?? ''),
     queryFn: () => chaptersApi.get(chapterId!),
     enabled: !!chapterId,
-    // Poll to detect when the analysis pipeline has caught up
-    refetchInterval: ANALYSIS_POLL_MS,
+    // No polling: analysis progress + completion arrive over SSE, and we
+    // explicitly refresh the chapter + bible queries when the stream ends.
   });
 
   const chapter = chapterQ.data?.chapter;
@@ -97,7 +105,6 @@ export function ChapterEditorPage() {
   );
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
   const previousChapterId = useRef<string | undefined>();
-  const previousAnalyzed = useRef<number>(-1);
 
   // When the chapter switches, sync local content
   useEffect(() => {
@@ -106,19 +113,25 @@ export function ChapterEditorPage() {
       setContent(chapter.content ?? '');
       setSaveState('idle');
       previousChapterId.current = chapter._id;
-      previousAnalyzed.current = chapter.lastAnalyzedVersion;
+      // Abort + reset any in-flight analysis — it belonged to the chapter we left.
+      analyzeAbort.current?.abort();
+      if (analyzeTimer.current) {
+        clearTimeout(analyzeTimer.current);
+        analyzeTimer.current = null;
+      }
+      setAnalyzing(false);
+      setAnalysisStep(-1);
+      setAnalyzeError(null);
     }
   }, [chapter]);
 
-  // When the analysis catches up to the latest save, refresh the right panel
+  // Abort the stream + clear the safety timer on unmount.
   useEffect(() => {
-    if (!chapter) return;
-    if (chapter.lastAnalyzedVersion > previousAnalyzed.current) {
-      previousAnalyzed.current = chapter.lastAnalyzedVersion;
-      qc.invalidateQueries({ queryKey: qk.charactersInChapter(chapter._id) });
-      qc.invalidateQueries({ queryKey: qk.inconsistenciesForChapter(chapter._id) });
-    }
-  }, [chapter, qc]);
+    return () => {
+      analyzeAbort.current?.abort();
+      if (analyzeTimer.current) clearTimeout(analyzeTimer.current);
+    };
+  }, []);
 
   // ─── Save mutation ─────────────────────────────────────────────────────
   const save = useMutation({
@@ -132,6 +145,68 @@ export function ChapterEditorPage() {
     },
     onError: () => setSaveState('error'),
   });
+
+  // ─── Analyze (manual trigger) ──────────────────────────────────────────
+  // Flushes any unsaved text first (so analysis runs on the latest version),
+  // then streams the pipeline's progress (SSE) to drive the stepper.
+  const ANALYZE_TIMEOUT_MS = 180_000;
+
+  const refreshBibleQueries = () => {
+    if (!chapterId) return;
+    qc.invalidateQueries({ queryKey: qk.chapter(chapterId) });
+    qc.invalidateQueries({ queryKey: qk.charactersInChapter(chapterId) });
+    qc.invalidateQueries({ queryKey: qk.inconsistenciesForChapter(chapterId) });
+    qc.invalidateQueries({ queryKey: qk.characters(projectId) });
+    qc.invalidateQueries({ queryKey: qk.locations(projectId) });
+    qc.invalidateQueries({ queryKey: qk.objects(projectId) });
+    qc.invalidateQueries({ queryKey: qk.timeline(projectId) });
+    qc.invalidateQueries({ queryKey: qk.relationships(projectId) });
+    qc.invalidateQueries({ queryKey: ['inconsistencies'] });
+  };
+
+  const handleAnalyze = async () => {
+    if (!chapterId || !chapter || analyzing) return;
+    setAnalyzeError(null);
+    setAnalyzing(true);
+    setAnalysisStep(0);
+
+    const controller = new AbortController();
+    analyzeAbort.current = controller;
+    // Safety net: abort if the pipeline never closes the stream.
+    if (analyzeTimer.current) clearTimeout(analyzeTimer.current);
+    analyzeTimer.current = setTimeout(() => controller.abort(), ANALYZE_TIMEOUT_MS);
+
+    try {
+      // Make sure the latest text is persisted before analyzing it.
+      if (content !== chapter.content) {
+        await save.mutateAsync(content);
+      }
+      await streamAnalysis({
+        chapterId,
+        signal: controller.signal,
+        onEvent: (e) => {
+          if (e.type === 'step') setAnalysisStep(e.index);
+          else if (e.type === 'error') setAnalyzeError(e.message);
+        },
+      });
+    } catch (err) {
+      const e = err as Error;
+      if (e.name !== 'AbortError') {
+        setAnalyzeError(e.message || "L'analyse a échoué.");
+      }
+    } finally {
+      if (analyzeTimer.current) {
+        clearTimeout(analyzeTimer.current);
+        analyzeTimer.current = null;
+      }
+      analyzeAbort.current = null;
+      setAnalyzing(false);
+      setAnalysisStep(-1);
+      // Refresh whatever the pipeline may have written (covers normal completion
+      // and a dropped stream where the 'done' frame never arrived).
+      refreshBibleQueries();
+    }
+  };
 
   // ─── Create chapter ────────────────────────────────────────────────────
   // Appends after the highest existing order, then jumps to it.
@@ -159,6 +234,24 @@ export function ChapterEditorPage() {
       navigate(`/projects/${projectId}/manuscript/${created._id}`);
     },
   });
+
+  // ─── Rename chapter ────────────────────────────────────────────────────
+  // The <h1> is contentEditable; we persist the new title on blur (or Enter).
+  const renameChapter = useMutation({
+    mutationFn: (title: string) => chaptersApi.updateMeta(chapterId!, { title }),
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: qk.chapter(chapterId!) }),
+        qc.invalidateQueries({ queryKey: qk.chapters(projectId) }),
+      ]);
+    },
+  });
+
+  const commitTitle = (raw: string) => {
+    const next = raw.trim();
+    if (!chapter || !next || next === chapter.title) return;
+    renameChapter.mutate(next);
+  };
 
   // ─── Delete chapter ────────────────────────────────────────────────────
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -208,6 +301,12 @@ export function ChapterEditorPage() {
   // new chapters" bug.
 
   const wordCount = countWords(content);
+  // There's something worth (re)analyzing if the saved version is ahead of the
+  // analyzed one, or if there are local edits not yet saved.
+  const hasUnanalyzed =
+    !!chapter &&
+    wordCount > 0 &&
+    (chapter.lastAnalyzedVersion < chapter.analysisVersion || content !== chapter.content);
   const loadingMessage = !chapter ? buildLoadingMessage() : null;
 
   function buildLoadingMessage(): string {
@@ -237,6 +336,21 @@ export function ChapterEditorPage() {
               </nav>
               <div className="topbar-actions">
                 <button
+                  className={`btn small${hasUnanalyzed && !analyzing ? ' primary' : ''}`}
+                  onClick={() => void handleAnalyze()}
+                  disabled={analyzing || wordCount === 0 || !hasUnanalyzed}
+                  title={
+                    wordCount === 0
+                      ? 'Écrivez du texte avant d\'analyser'
+                      : hasUnanalyzed
+                        ? 'Analyser ce chapitre avec l\'IA (personnages, cohérence, recherche)'
+                        : 'Chapitre déjà analysé — aucune modification depuis'
+                  }
+                >
+                  <IconSparkle size={12} />
+                  {analyzing ? 'Analyse…' : hasUnanalyzed ? 'Analyser' : 'À jour'}
+                </button>
+                <button
                   className="btn small"
                   onClick={() => createChapter.mutate()}
                   disabled={createChapter.isPending}
@@ -261,7 +375,18 @@ export function ChapterEditorPage() {
             <div className="editor-scroll">
               <article className="editor">
                 <div className="chap-num">chapitre {chapter.order}</div>
-                <h1 contentEditable suppressContentEditableWarning>
+                <h1
+                  contentEditable
+                  suppressContentEditableWarning
+                  spellCheck={false}
+                  onBlur={(e) => commitTitle(e.currentTarget.textContent ?? '')}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      e.currentTarget.blur();
+                    }
+                  }}
+                >
                   {chapter.title}
                 </h1>
                 <textarea
@@ -287,6 +412,11 @@ export function ChapterEditorPage() {
           draftWordCount={wordCount}
           saveState={saveState}
           lastSavedAt={lastSavedAt}
+          analyzing={analyzing}
+          analysisStep={analysisStep}
+          hasUnanalyzed={hasUnanalyzed}
+          analyzeError={analyzeError}
+          onAnalyze={() => void handleAnalyze()}
         />
       )}
 

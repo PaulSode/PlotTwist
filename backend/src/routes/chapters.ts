@@ -2,7 +2,11 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { Chapter, Project } from '../models/index.js';
 import { requireAuth } from './_auth.js';
-import { enqueueAnalysis } from '../services/analysisQueue.js';
+import { startSSE } from './_sse.js';
+import { analyzeChapter, cleanupChapterData } from '../services/bibleService.js';
+
+// Guards against two overlapping analyses of the same chapter (e.g. two tabs).
+const inFlightAnalyses = new Set<string>();
 
 const createSchema = z.object({
   projectId: z.string().length(24),
@@ -60,7 +64,8 @@ export async function chapterRoutes(app: FastifyInstance): Promise<void> {
       wordCount: countWords(body.content),
     });
 
-    if (body.content.trim().length > 0) enqueueAnalysis(String(chapter._id));
+    // Analysis is manual (the "Analyser le chapitre" button) — we don't run the
+    // expensive AI pipeline automatically on create.
 
     reply.code(201);
     return { chapter };
@@ -81,14 +86,50 @@ export async function chapterRoutes(app: FastifyInstance): Promise<void> {
     const chapter = await ensureOwned(req, id);
     if (!chapter) return reply.code(404).send({ error: 'Chapter not found' });
 
+    // Only bump the analysis version when the text actually changed. A redundant
+    // save with identical content must not resurface a spurious "not analyzed"
+    // state (and we never auto-analyze here — the author triggers it to control
+    // cost). Saving text stays free.
+    const changed = chapter.content !== content;
     chapter.content = content;
     chapter.wordCount = countWords(content);
-    chapter.analysisVersion += 1;
+    if (changed) chapter.analysisVersion += 1;
     await chapter.save();
 
-    enqueueAnalysis(id);
-
     return { savedAt: new Date(), wordCount: chapter.wordCount, analysisVersion: chapter.analysisVersion };
+  });
+
+  // Manually trigger the AI analysis pipeline for a chapter.
+  // Streams live progress as Server-Sent Events so the editor can drive a stepper:
+  //   event: step  { step, index, total }   — emitted at the start of each phase
+  //   event: done  {}                        — pipeline finished
+  //   event: error { message }               — pipeline failed
+  app.post('/chapters/:id/analyze', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const chapter = await ensureOwned(req, id);
+    if (!chapter) return reply.code(404).send({ error: 'Chapter not found' });
+
+    const sse = startSSE(req, reply);
+
+    if (inFlightAnalyses.has(id)) {
+      sse.write('error', { message: 'Une analyse est déjà en cours pour ce chapitre.' });
+      sse.end();
+      return;
+    }
+
+    inFlightAnalyses.add(id);
+    try {
+      await analyzeChapter(id, {
+        onProgress: (p) => sse.write('step', p),
+      });
+      sse.write('done', {});
+    } catch (err) {
+      req.log.error({ err }, 'Chapter analysis failed');
+      sse.write('error', { message: "L'analyse a échoué." });
+    } finally {
+      inFlightAnalyses.delete(id);
+      sse.end();
+    }
   });
 
   // Update chapter metadata (title, order, status…)
@@ -106,10 +147,16 @@ export async function chapterRoutes(app: FastifyInstance): Promise<void> {
     const { id } = req.params as { id: string };
     const chapter = await ensureOwned(req, id);
     if (!chapter) return reply.code(404).send({ error: 'Chapter not found' });
+    const projectId = String(chapter.projectId);
     await chapter.deleteOne();
-    // Note: orphaned attributes will be ignored when the bible summary is built
-    // since they reference a chapter that no longer exists. A periodic
-    // garbage-collection job (cleanupOrphanedAttributes) can clean them up.
+    // Remove everything this chapter contributed to the bible (attributes,
+    // appearances, events, relationship evolutions, chunks, inconsistencies)
+    // so nothing orphaned lingers in the dashboards or the RAG index.
+    try {
+      await cleanupChapterData(projectId, id);
+    } catch (err) {
+      req.log.error({ err }, 'cleanupChapterData failed after chapter delete');
+    }
     reply.code(204);
   });
 }

@@ -1,6 +1,6 @@
-# Plotwise — Frontend
+# PlotTwist — Frontend
 
-The React app for [Plotwise](../plotwise-backend/README.md). Talks exclusively to the backend over the documented HTTP + SSE surface.
+The React app for [PlotTwist](../plottwist-backend/README.md). Talks exclusively to the backend over the documented HTTP + SSE surface.
 
 ## Stack
 
@@ -52,7 +52,7 @@ That's the magic moment from the original concept — Camille writes "le regard 
 
 ## Design
 
-The visual language stays identical to the original mockup (`plotwise.html`): a single dark theme with charcoal panels, a warm amber accent, IBM Plex Sans for UI, Source Serif 4 for the manuscript and AI-generated prose, IBM Plex Mono for counts and metadata. All tokens are in `src/styles/global.css`. Component-scoped styles use the colocated `<style>` pattern — it's deliberate: the only consumer of `.attr-card` is `CharacterDetailPage`, so the style lives there.
+The visual language stays identical to the original mockup (`plottwist.html`): a single dark theme with charcoal panels, a warm amber accent, IBM Plex Sans for UI, Source Serif 4 for the manuscript and AI-generated prose, IBM Plex Mono for counts and metadata. All tokens are in `src/styles/global.css`. Component-scoped styles use the colocated `<style>` pattern — it's deliberate: the only consumer of `.attr-card` is `CharacterDetailPage`, so the style lives there.
 
 ## Project structure
 

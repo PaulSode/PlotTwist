@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { Project } from '../models/index.js';
 import { requireAuth } from './_auth.js';
+import { cleanupProjectData } from '../services/bibleService.js';
 
 const createSchema = z.object({
   title: z.string().min(1).max(200),
@@ -50,6 +51,12 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     const { id } = req.params as { id: string };
     const r = await Project.deleteOne({ _id: id, userId: req.userId });
     if (r.deletedCount === 0) return reply.code(404).send({ error: 'Project not found' });
+    // Cascade: remove all chapters, entities, chunks, etc. for this project.
+    try {
+      await cleanupProjectData(id);
+    } catch (err) {
+      req.log.error({ err }, 'cleanupProjectData failed after project delete');
+    }
     reply.code(204);
   });
 }

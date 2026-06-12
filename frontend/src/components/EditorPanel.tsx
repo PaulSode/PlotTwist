@@ -1,9 +1,13 @@
+import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { bibleApi, chaptersApi, inconsistenciesApi } from '../lib/api';
 import { qk } from '../lib/queryKeys';
 import type { Chapter, ChapterStatus, Inconsistency } from '../lib/types';
 import { refLabel } from '../lib/types';
-import { IconAlert } from './icons';
+import { IconAlert, IconChat, IconSparkle, IconCheck } from './icons';
+
+type PanelTab = 'scene' | 'consistency' | 'leads';
 
 interface EditorPanelProps {
   chapter: Chapter;
@@ -11,12 +15,37 @@ interface EditorPanelProps {
   draftWordCount: number;
   saveState: 'idle' | 'saving' | 'saved' | 'error';
   lastSavedAt: Date | null;
+  /** True while a user-triggered analysis is in flight. */
+  analyzing: boolean;
+  /** Index of the analysis phase currently running (-1 = none). */
+  analysisStep: number;
+  /** True when there are saved/local changes not yet analyzed. */
+  hasUnanalyzed: boolean;
+  analyzeError: string | null;
+  onAnalyze: () => void;
 }
 
-export function EditorPanel({ chapter }: EditorPanelProps) {
+/** Phases mirror the backend pipeline (ANALYSIS_STEPS), in order. */
+const ANALYSIS_STEP_LABELS: { key: string; label: string }[] = [
+  { key: 'preparing', label: 'Préparation' },
+  { key: 'extracting', label: 'Extraction des entités' },
+  { key: 'bible', label: 'Construction de la bible' },
+  { key: 'indexing', label: 'Indexation (recherche)' },
+  { key: 'finalizing', label: 'Finalisation' },
+];
+
+export function EditorPanel({
+  chapter,
+  analyzing,
+  analysisStep,
+  hasUnanalyzed,
+  analyzeError,
+  onAnalyze,
+}: EditorPanelProps) {
   const chapterId = chapter._id;
   const projectId = chapter.projectId;
   const qc = useQueryClient();
+  const [tab, setTab] = useState<PanelTab>('scene');
 
   const charactersQ = useQuery({
     queryKey: qk.charactersInChapter(chapterId),
@@ -48,107 +77,180 @@ export function EditorPanel({ chapter }: EditorPanelProps) {
   const inconsistencies = incoQ.data?.inconsistencies ?? [];
 
   // ─── Analysis state derivation ──────────────────────────────────────────
-  // The default Mongoose values for a new chapter are analysisVersion=0 and
-  // lastAnalyzedVersion=-1, which would naively show "en attente" forever for
-  // an empty chapter the user hasn't typed in yet — no analysis job is ever
-  // enqueued for empty content on the backend. Treat that case explicitly.
+  // Analysis is manual now: a chapter can have unanalyzed changes sitting idle
+  // (the author hasn't clicked "Analyser" yet). Distinguish:
+  //   - analyzing                  → a run the user launched is in flight
+  //   - hasUnanalyzed (not running)→ changes waiting for a manual analysis
+  //   - up to date                 → analyzed, nothing new since
   const analysisDisplay = (() => {
+    if (analyzing) return 'analyse en cours…';
     if (chapter.wordCount === 0) return '—';
-    if (chapter.lastAnalyzedVersion < chapter.analysisVersion) return 'analyse en cours…';
+    if (hasUnanalyzed) return 'modifications non analysées';
     if (chapter.lastAnalyzedAt) return `à jour · ${formatRelative(chapter.lastAnalyzedAt)}`;
-    return '—';
+    return 'jamais analysé';
   })();
-  const analysisPending =
-    chapter.wordCount > 0 && chapter.lastAnalyzedVersion < chapter.analysisVersion;
+  const analysisPending = analyzing;
 
   return (
     <aside className="panel">
       <div className="panel-tabs">
-        <div className="ptab active">Dans la scène</div>
-        <div className="ptab">
+        <button
+          className={`ptab${tab === 'scene' ? ' active' : ''}`}
+          onClick={() => setTab('scene')}
+        >
+          Dans la scène
+        </button>
+        <button
+          className={`ptab${tab === 'consistency' ? ' active' : ''}`}
+          onClick={() => setTab('consistency')}
+        >
           Cohérence{' '}
           <span className={`num${inconsistencies.length > 0 ? ' alert' : ''}`}>
             {inconsistencies.length}
           </span>
-        </div>
-        <div className="ptab">Pistes</div>
+        </button>
+        <button
+          className={`ptab${tab === 'leads' ? ' active' : ''}`}
+          onClick={() => setTab('leads')}
+        >
+          Pistes
+        </button>
       </div>
 
       <div className="panel-body">
-        {/* Inconsistencies — surfaced first because they're the alert */}
-        {inconsistencies.length > 0 && (
-          <div className="psection">
-            {inconsistencies.map((ic) => (
-              <InconsistencyCard key={ic._id} inconsistency={ic} />
-            ))}
-          </div>
-        )}
-
-        {/* Characters */}
-        <div className="psection">
-          <div className="psection-label">
-            Personnages <span className="count">{characters.length}</span>
-          </div>
-          {charactersQ.isLoading ? (
-            <div className="loading" style={{ padding: '4px 6px' }}>
-              …
-            </div>
-          ) : characters.length === 0 ? (
-            <div className="loading" style={{ padding: '4px 6px' }}>
-              {chapter.lastAnalyzedVersion < chapter.analysisVersion
-                ? 'Analyse en cours…'
-                : 'Aucun personnage extrait'}
-            </div>
-          ) : (
-            characters.map((c) => (
-              <div key={c._id} className="entity">
-                <div className="iv">{initials(c.canonicalName)}</div>
-                <div className="ename">{c.canonicalName}</div>
-                <div className="erole">{translateImportance(c.importance)}</div>
+        {tab === 'scene' && (
+          <>
+            {/* Characters */}
+            <div className="psection">
+              <div className="psection-label">
+                Personnages <span className="count">{characters.length}</span>
               </div>
-            ))
-          )}
-        </div>
-
-        {/* Scene summary */}
-        {chapter.aiSummary && (
-          <div className="psection">
-            <div className="psection-label">Résumé IA</div>
-            <div className="note" style={{ fontFamily: 'var(--font-serif)' }}>
-              {chapter.aiSummary}
+              {charactersQ.isLoading ? (
+                <div className="loading" style={{ padding: '4px 6px' }}>
+                  …
+                </div>
+              ) : characters.length === 0 ? (
+                <div className="loading" style={{ padding: '4px 6px' }}>
+                  {analyzing
+                    ? 'Analyse en cours…'
+                    : hasUnanalyzed
+                      ? 'Cliquez sur « Analyser le chapitre »'
+                      : 'Aucun personnage extrait'}
+                </div>
+              ) : (
+                characters.map((c) => (
+                  <Link
+                    key={c._id}
+                    to={`/projects/${projectId}/characters/${c._id}`}
+                    className="entity"
+                  >
+                    <div className="iv">{initials(c.canonicalName)}</div>
+                    <div className="ename">{c.canonicalName}</div>
+                    <div className="erole">{translateImportance(c.importance)}</div>
+                  </Link>
+                ))
+              )}
             </div>
+
+            {/* Scene summary */}
+            {chapter.aiSummary && (
+              <div className="psection">
+                <div className="psection-label">Résumé IA</div>
+                <div className="note" style={{ fontFamily: 'var(--font-serif)' }}>
+                  {chapter.aiSummary}
+                </div>
+              </div>
+            )}
+
+            {/* Meta */}
+            <div className="psection">
+              <div className="psection-label">Avancement</div>
+              <div className="meta-row">
+                <span className="k">Mots</span>
+                <span className="v">{chapter.wordCount.toLocaleString('fr-FR')}</span>
+              </div>
+              <div className="meta-row">
+                <span className="k">Statut</span>
+                <select
+                  className="meta-select"
+                  value={chapter.status}
+                  onChange={(e) => updateStatus.mutate(e.target.value as ChapterStatus)}
+                  disabled={updateStatus.isPending}
+                >
+                  <option value="outline">plan</option>
+                  <option value="draft">brouillon</option>
+                  <option value="revised">revu</option>
+                  <option value="done">terminé</option>
+                </select>
+              </div>
+              <div className="meta-row">
+                <span className="k">Analyse</span>
+                <span className="v">
+                  {analysisPending && <span className="analysis-pulse" />}
+                  {analysisDisplay}
+                </span>
+              </div>
+
+              {analyzing ? (
+                <AnalysisStepper currentStep={analysisStep} />
+              ) : (
+                <>
+                  <button
+                    className={`analyze-btn${hasUnanalyzed ? ' primary' : ''}`}
+                    onClick={onAnalyze}
+                    disabled={chapter.wordCount === 0 || !hasUnanalyzed}
+                  >
+                    <IconSparkle size={13} />
+                    {hasUnanalyzed ? 'Analyser le chapitre' : 'Chapitre à jour'}
+                  </button>
+                  {analyzeError && <div className="analyze-error">{analyzeError}</div>}
+                  <div className="analyze-hint">
+                    L'analyse (personnages, cohérence, recherche) consomme des crédits IA.
+                    Elle ne se lance qu'à la demande.
+                  </div>
+                </>
+              )}
+            </div>
+          </>
+        )}
+
+        {tab === 'consistency' && (
+          <div className="psection">
+            {incoQ.isLoading ? (
+              <div className="loading" style={{ padding: '4px 6px' }}>…</div>
+            ) : inconsistencies.length === 0 ? (
+              <div className="note" style={{ color: 'var(--text-3)' }}>
+                Aucune incohérence détectée dans ce chapitre.
+              </div>
+            ) : (
+              inconsistencies.map((ic) => (
+                <InconsistencyCard key={ic._id} inconsistency={ic} />
+              ))
+            )}
           </div>
         )}
 
-        {/* Meta */}
-        <div className="psection">
-          <div className="psection-label">Avancement</div>
-          <div className="meta-row">
-            <span className="k">Mots</span>
-            <span className="v">{chapter.wordCount.toLocaleString('fr-FR')}</span>
-          </div>
-          <div className="meta-row">
-            <span className="k">Statut</span>
-            <select
-              className="meta-select"
-              value={chapter.status}
-              onChange={(e) => updateStatus.mutate(e.target.value as ChapterStatus)}
-              disabled={updateStatus.isPending}
+        {tab === 'leads' && (
+          <div className="psection">
+            {chapter.aiSummary ? (
+              <div className="note" style={{ fontFamily: 'var(--font-serif)', marginBottom: 14 }}>
+                {chapter.aiSummary}
+              </div>
+            ) : (
+              <div className="note" style={{ color: 'var(--text-3)', marginBottom: 14 }}>
+                Écrivez quelques paragraphes : l'IA résumera la scène et l'assistant pourra
+                vous proposer des pistes.
+              </div>
+            )}
+            <Link
+              to={`/projects/${projectId}/assistant`}
+              className="lead-cta"
             >
-              <option value="outline">plan</option>
-              <option value="draft">brouillon</option>
-              <option value="revised">revu</option>
-              <option value="done">terminé</option>
-            </select>
+              <IconChat size={13} />
+              Demander des pistes à l'assistant
+            </Link>
           </div>
-          <div className="meta-row">
-            <span className="k">Analyse</span>
-            <span className="v">
-              {analysisPending && <span className="analysis-pulse" />}
-              {analysisDisplay}
-            </span>
-          </div>
-        </div>
+        )}
       </div>
 
       <div className="panel-foot">
@@ -158,6 +260,34 @@ export function EditorPanel({ chapter }: EditorPanelProps) {
 
       <PanelStyles />
     </aside>
+  );
+}
+
+// ─── Analysis stepper ────────────────────────────────────────────────────────
+
+function AnalysisStepper({ currentStep }: { currentStep: number }) {
+  // currentStep is the index of the running phase (clamped to a sensible range).
+  const active = Math.max(0, currentStep);
+  return (
+    <div className="stepper">
+      <div className="stepper-head">
+        <span className="analysis-pulse" />
+        Analyse en cours…
+      </div>
+      <ol className="stepper-list">
+        {ANALYSIS_STEP_LABELS.map((s, i) => {
+          const state = i < active ? 'done' : i === active ? 'active' : 'pending';
+          return (
+            <li key={s.key} className={`stepper-item ${state}`}>
+              <span className="stepper-marker">
+                {state === 'done' ? <IconCheck size={11} /> : <span className="stepper-dot" />}
+              </span>
+              <span className="stepper-label">{s.label}</span>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
   );
 }
 
@@ -266,8 +396,10 @@ function PanelStyles() {
       .ptab {
         font-size: 12.5px; color: var(--text-3);
         cursor: pointer; padding: 13px 0;
+        background: none; border: none;
         border-bottom: 1.5px solid transparent;
         margin-bottom: -1px; user-select: none;
+        font-family: inherit;
         display: flex; align-items: center; gap: 5px;
         transition: color 100ms;
       }
@@ -396,6 +528,94 @@ function PanelStyles() {
         line-height: 1.55; padding: 7px 8px;
         border-radius: 5px;
       }
+
+      .lead-cta {
+        display: flex; align-items: center; justify-content: center; gap: 7px;
+        padding: 9px 12px; border-radius: 6px;
+        border: 1px solid var(--border);
+        background: var(--bg-editor);
+        color: var(--text-2); font-size: 12.5px;
+        transition: all 100ms;
+      }
+      .lead-cta:hover { border-color: var(--border-strong); color: var(--text); }
+      .lead-cta svg { flex-shrink: 0; }
+
+      .analyze-btn {
+        width: 100%; margin-top: 12px;
+        display: flex; align-items: center; justify-content: center; gap: 7px;
+        padding: 8px 12px; border-radius: 6px;
+        border: 1px solid var(--border);
+        background: var(--bg-editor);
+        color: var(--text-2); font-family: inherit; font-size: 12.5px;
+        cursor: pointer; transition: all 100ms;
+      }
+      .analyze-btn:hover:not([disabled]) { border-color: var(--border-strong); color: var(--text); }
+      .analyze-btn.primary {
+        background: var(--accent); color: #1a1206;
+        border-color: var(--accent); font-weight: 500;
+      }
+      .analyze-btn.primary:hover:not([disabled]) { background: #cdab7e; border-color: #cdab7e; }
+      .analyze-btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+      .analyze-btn svg { flex-shrink: 0; }
+      .analyze-error {
+        margin-top: 8px; font-size: 11.5px; color: var(--danger);
+        line-height: 1.45;
+      }
+      .analyze-hint {
+        margin-top: 8px; font-size: 11px; color: var(--text-3);
+        line-height: 1.45;
+      }
+
+      .stepper {
+        margin-top: 12px;
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        padding: 12px 13px 13px;
+        background: var(--bg-editor);
+      }
+      .stepper-head {
+        display: flex; align-items: center; gap: 7px;
+        font-size: 12px; color: var(--text); font-weight: 500;
+        margin-bottom: 12px;
+      }
+      .stepper-list { list-style: none; display: flex; flex-direction: column; }
+      .stepper-item {
+        display: flex; align-items: center; gap: 10px;
+        position: relative; padding: 5px 0;
+        font-size: 12px; color: var(--text-3);
+      }
+      /* connector line between markers */
+      .stepper-item:not(:last-child)::before {
+        content: ''; position: absolute;
+        left: 8px; top: 22px; bottom: -3px;
+        width: 1.5px; background: var(--border);
+      }
+      .stepper-item.done::before { background: var(--success); }
+      .stepper-marker {
+        width: 17px; height: 17px; flex-shrink: 0;
+        border-radius: 50%;
+        display: flex; align-items: center; justify-content: center;
+        border: 1.5px solid var(--border-strong);
+        background: var(--bg-panel); color: var(--bg);
+        z-index: 1;
+      }
+      .stepper-dot {
+        width: 5px; height: 5px; border-radius: 50%;
+        background: var(--text-4);
+      }
+      .stepper-item.done .stepper-marker {
+        background: var(--success); border-color: var(--success); color: #0d1410;
+      }
+      .stepper-item.active .stepper-marker {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px var(--accent-bg);
+      }
+      .stepper-item.active .stepper-dot {
+        background: var(--accent);
+        animation: pulse 1.2s ease-in-out infinite;
+      }
+      .stepper-item.active .stepper-label { color: var(--text); font-weight: 500; }
+      .stepper-item.done .stepper-label { color: var(--text-2); }
 
       .panel-foot {
         padding: 9px 16px; border-top: 1px solid var(--border);

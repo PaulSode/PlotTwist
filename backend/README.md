@@ -1,6 +1,6 @@
-# Plotwise — Backend
+# PlotTwist — Backend
 
-The narrative-analysis backend for [Plotwise](../plotwise.html), the writing copilot that *understands* the manuscript.
+The narrative-analysis backend for [PlotTwist](../plottwist.html), the writing copilot that *understands* the manuscript.
 
 ## Stack
 

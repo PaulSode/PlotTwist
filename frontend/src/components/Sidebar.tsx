@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
-import { Link, NavLink, useParams } from 'react-router-dom';
+import { Link, NavLink, useNavigate, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { chaptersApi, inconsistenciesApi, projectsApi } from '../lib/api';
+import { chaptersApi, inconsistenciesApi, meApi, projectsApi } from '../lib/api';
 import { qk } from '../lib/queryKeys';
 import type { Chapter } from '../lib/types';
 import {
@@ -9,6 +9,7 @@ import {
   IconUsers,
   IconClock,
   IconMap,
+  IconBox,
   IconLink,
   IconAlert,
   IconChat,
@@ -24,6 +25,14 @@ interface SidebarProps {
 
 export function Sidebar({ activeChapterId }: SidebarProps) {
   const { projectId = '' } = useParams();
+  const navigate = useNavigate();
+  const [searchInput, setSearchInput] = useState('');
+
+  const runSearch = () => {
+    const q = searchInput.trim();
+    if (!q) return;
+    navigate(`/projects/${projectId}/search?q=${encodeURIComponent(q)}`);
+  };
 
   const projectQ = useQuery({
     queryKey: qk.project(projectId),
@@ -44,15 +53,27 @@ export function Sidebar({ activeChapterId }: SidebarProps) {
     enabled: !!projectId,
   });
 
+  const meQ = useQuery({
+    queryKey: qk.me(),
+    queryFn: () => meApi.get(),
+    staleTime: 5 * 60_000,
+  });
+
   const openIncoCount = incoQ.data?.inconsistencies.length ?? 0;
   const project = projectQ.data?.project;
+
+  const me = meQ.data?.user;
+  const displayName = me?.name || me?.email || 'Auteur';
+  const planLabel = { free: 'Plan gratuit', auteur: 'Plan auteur', pro: 'Plan pro' }[
+    me?.plan ?? 'free'
+  ];
 
   return (
     <aside className="sidebar">
       <div className="sidebar-head">
         <Link to="/" className="brand">
           <span className="brand-mark" />
-          Plotwise
+          PlotTwist
         </Link>
         <Link to="/" className="project-pick" title="Changer de projet">
           {project ? truncate(project.title, 8) : '…'}
@@ -64,8 +85,14 @@ export function Sidebar({ activeChapterId }: SidebarProps) {
         <span className="ico-search">
           <IconSearch size={13} />
         </span>
-        <input type="text" placeholder="Rechercher dans l'œuvre…" />
-        <span className="kbd">⌘K</span>
+        <input
+          type="text"
+          placeholder="Rechercher dans l'œuvre…"
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && runSearch()}
+        />
+        <span className="kbd">↵</span>
       </div>
 
       <nav className="nav">
@@ -81,6 +108,9 @@ export function Sidebar({ activeChapterId }: SidebarProps) {
         <SideLink to={`/projects/${projectId}/locations`} icon={<IconMap size={14} />}>
           Lieux
         </SideLink>
+        <SideLink to={`/projects/${projectId}/objects`} icon={<IconBox size={14} />}>
+          Objets
+        </SideLink>
         <SideLink to={`/projects/${projectId}/relationships`} icon={<IconLink size={14} />}>
           Relations
         </SideLink>
@@ -94,6 +124,9 @@ export function Sidebar({ activeChapterId }: SidebarProps) {
         </SideLink>
         <SideLink to={`/projects/${projectId}/assistant`} icon={<IconChat size={14} />}>
           Assistant
+        </SideLink>
+        <SideLink to={`/projects/${projectId}/search`} icon={<IconSearch size={14} />}>
+          Recherche
         </SideLink>
       </nav>
 
@@ -114,10 +147,10 @@ export function Sidebar({ activeChapterId }: SidebarProps) {
       )}
 
       <div className="sidebar-foot">
-        <div className="avatar">CL</div>
+        <div className="avatar">{userInitials(displayName)}</div>
         <div className="user-info">
-          <div className="uname">Camille Lefort</div>
-          <div className="uplan">Plan auteur</div>
+          <div className="uname">{displayName}</div>
+          <div className="uplan">{planLabel}</div>
         </div>
         <button className="icon-btn" aria-label="Paramètres">
           <IconSettings size={14} />
@@ -300,4 +333,11 @@ function formatWords(n: number): string {
 
 function truncate(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n - 1) + '…';
+}
+
+function userInitials(name: string): string {
+  const parts = name.split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return '·';
+  if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
+  return (parts[0]![0]! + parts[1]![0]!).toUpperCase();
 }

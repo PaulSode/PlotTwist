@@ -1,5 +1,5 @@
 /**
- * Plotwise data model.
+ * PlotTwist data model.
  *
  * Three layers (cf. architecture doc):
  *   1. Raw text       — Chapter.content, the source of truth the author edits

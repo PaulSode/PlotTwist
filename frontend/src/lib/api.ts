@@ -1,5 +1,5 @@
 /**
- * Plotwise API client.
+ * PlotTwist API client.
  *
  * Thin typed wrapper over fetch. The auth header uses the dev-mode bypass
  * documented in the backend's _auth.ts (`Authorization: Dev <userId>`); swap
@@ -45,6 +45,19 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+// ─── Current user ───────────────────────────────────────────────────────────
+
+export interface MeUser {
+  _id: ID;
+  name: string | null;
+  email: string | null;
+  plan: 'free' | 'auteur' | 'pro';
+}
+
+export const meApi = {
+  get: () => request<{ user: MeUser }>('/me', { headers: headers() }),
+};
+
 // ─── Projects ───────────────────────────────────────────────────────────────
 
 export const projectsApi = {
@@ -55,6 +68,20 @@ export const projectsApi = {
       method: 'POST',
       headers: headers(true),
       body: JSON.stringify(data),
+    }),
+  update: (
+    id: ID,
+    data: { title?: string; description?: string; language?: string; genre?: string },
+  ) =>
+    request<{ project: Project }>(`/projects/${id}`, {
+      method: 'PATCH',
+      headers: headers(true),
+      body: JSON.stringify(data),
+    }),
+  remove: (id: ID) =>
+    request<void>(`/projects/${id}`, {
+      method: 'DELETE',
+      headers: headers(),
     }),
 };
 
@@ -155,6 +182,78 @@ export const searchApi = {
       { headers: headers() },
     ),
 };
+
+// ─── Analysis (SSE streaming progress) ──────────────────────────────────────
+
+export type AnalysisStepKey = 'preparing' | 'extracting' | 'bible' | 'indexing' | 'finalizing';
+
+export type AnalysisEvent =
+  | { type: 'step'; step: AnalysisStepKey; index: number; total: number }
+  | { type: 'done' }
+  | { type: 'error'; message: string };
+
+/**
+ * Trigger a chapter analysis and stream its progress as SSE.
+ * Calls onEvent for every frame; resolves when the stream closes.
+ */
+export function streamAnalysis(args: {
+  chapterId: ID;
+  signal?: AbortSignal;
+  onEvent: (event: AnalysisEvent) => void;
+}): Promise<void> {
+  return fetch(`${API}/v1/chapters/${args.chapterId}/analyze`, {
+    method: 'POST',
+    headers: headers(),
+    signal: args.signal,
+  }).then(async (res) => {
+    if (!res.ok || !res.body) {
+      throw new Error(`Analyse impossible : ${res.status}`);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      let idx: number;
+      while ((idx = buffer.indexOf('\n\n')) !== -1) {
+        const frame = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        const event = parseAnalysisFrame(frame);
+        if (event) args.onEvent(event);
+      }
+    }
+  });
+}
+
+function parseAnalysisFrame(frame: string): AnalysisEvent | null {
+  const lines = frame.split('\n');
+  let eventName: string | undefined;
+  let dataStr = '';
+  for (const line of lines) {
+    if (line.startsWith('event:')) eventName = line.slice(6).trim();
+    else if (line.startsWith('data:')) dataStr += line.slice(5).trim();
+  }
+  if (!eventName) return null;
+  try {
+    const data = dataStr ? JSON.parse(dataStr) : {};
+    switch (eventName) {
+      case 'step':
+        return { type: 'step', step: data.step, index: data.index ?? 0, total: data.total ?? 5 };
+      case 'done':
+        return { type: 'done' };
+      case 'error':
+        return { type: 'error', message: data.message ?? 'Erreur inconnue' };
+      default:
+        return null;
+    }
+  } catch {
+    return null;
+  }
+}
 
 // ─── Assistant (SSE streaming) ──────────────────────────────────────────────
 

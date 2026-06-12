@@ -15,6 +15,7 @@ import { streamAssistant, type AssistantMessage } from '../ai/assistant.js';
 import { searchChunks } from '../services/rag.js';
 import { buildBibleSummary } from '../ai/prompts.js';
 import { requireAuth } from './_auth.js';
+import { startSSE } from './_sse.js';
 
 const bodySchema = z.object({
   messages: z
@@ -77,20 +78,10 @@ export async function assistantRoutes(app: FastifyInstance): Promise<void> {
     }
 
     // ─── Stream as SSE ────────────────────────────────────────────────────
-    reply.raw.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache, no-transform',
-      Connection: 'keep-alive',
-      'X-Accel-Buffering': 'no',
-    });
-
-    const writeEvent = (event: string, data: unknown): void => {
-      reply.raw.write(`event: ${event}\n`);
-      reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
-    };
+    const sse = startSSE(req, reply);
 
     try {
-      writeEvent('start', { ragHits: ragHits.map((h) => h.chapterTitle) });
+      sse.write('start', { ragHits: ragHits.map((h) => h.chapterTitle) });
 
       const stream = streamAssistant({
         history: messages as AssistantMessage[],
@@ -98,15 +89,15 @@ export async function assistantRoutes(app: FastifyInstance): Promise<void> {
       });
 
       for await (const delta of stream) {
-        writeEvent('delta', { text: delta });
+        sse.write('delta', { text: delta });
       }
 
-      writeEvent('done', {});
+      sse.write('done', {});
     } catch (err) {
       req.log.error({ err }, 'Assistant stream failed');
-      writeEvent('error', { message: 'Assistant stream failed.' });
+      sse.write('error', { message: 'Assistant stream failed.' });
     } finally {
-      reply.raw.end();
+      sse.end();
     }
   });
 }

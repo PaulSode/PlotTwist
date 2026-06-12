@@ -7,9 +7,11 @@ import { CharactersPage } from './pages/CharactersPage';
 import { CharacterDetailPage } from './pages/CharacterDetailPage';
 import { TimelinePage } from './pages/TimelinePage';
 import { LocationsPage } from './pages/LocationsPage';
+import { ObjectsPage } from './pages/ObjectsPage';
 import { RelationshipsPage } from './pages/RelationshipsPage';
 import { InconsistenciesPage } from './pages/InconsistenciesPage';
 import { AssistantPage } from './pages/AssistantPage';
+import { SearchPage } from './pages/SearchPage';
 
 export function App() {
   return (
@@ -32,7 +34,9 @@ export function App() {
             <Route path="characters/:characterId" element={<CharacterDetailPage />} />
             <Route path="timeline" element={<TimelinePage />} />
             <Route path="locations" element={<LocationsPage />} />
+            <Route path="objects" element={<ObjectsPage />} />
             <Route path="relationships" element={<RelationshipsPage />} />
+            <Route path="search" element={<SearchPage />} />
             <Route path="inconsistencies" element={<InconsistenciesPage />} />
             <Route path="assistant" element={<AssistantPage />} />
           </Route>

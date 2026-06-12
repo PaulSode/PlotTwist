@@ -10,7 +10,7 @@
  *   3. Otherwise RAG: retrieve top-K relevant chunks
  */
 
-import { anthropic } from './client.js';
+import { anthropic, cachedSystem } from './client.js';
 import { config } from '../config.js';
 import { ASSISTANT_SYSTEM } from './prompts.js';
 
@@ -48,7 +48,7 @@ export async function* streamAssistant(args: {
   const stream = anthropic.messages.stream({
     model: config.models.assistant,
     max_tokens: 2048,
-    system: ASSISTANT_SYSTEM,
+    system: cachedSystem(ASSISTANT_SYSTEM),
     messages,
   });
 

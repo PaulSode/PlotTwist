@@ -119,3 +119,23 @@ export const IconTrash = (p: Props) => (
     <path d="M3 6h18M9 6v12a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2V6M10 11h4" />
   </Ico>
 );
+
+export const IconBox = (p: Props) => (
+  <Ico {...p}>
+    <path d="M21 8 12 3 3 8v8l9 5 9-5z" />
+    <path d="M3 8l9 5 9-5M12 13v8" />
+  </Ico>
+);
+
+export const IconCheck = (p: Props) => (
+  <Ico {...p}>
+    <path d="M20 6 9 17l-5-5" />
+  </Ico>
+);
+
+export const IconSparkle = (p: Props) => (
+  <Ico {...p}>
+    <path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z" />
+    <path d="M18 16l.6 1.8L20.5 18.5 18.7 19l-.7 1.9L17.3 19l-1.8-.5 1.8-.7z" />
+  </Ico>
+);
